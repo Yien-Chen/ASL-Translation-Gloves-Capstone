@@ -1,52 +1,55 @@
+
 #include <ArduinoBLE.h>
-#include <Arduino_LSM9DS1.h>  // IMU library
+#include <Arduino_LSM9DS1.h>
 #include <Arduino.h>
 #include <Thread.h>
+#include <DFRobotDFPlayerMini.h>
+
 // ---------------------------------------------------------------------------
 //     GLOBAL SETTINGS & CONSTANTS
 // ---------------------------------------------------------------------------
-
-// Toggle these to disable or enable Bluetooth and Calibration
 const bool BLUETOOTH_ENABLED   = false;
-const bool CALIBRATION_ENABLED = true;  // set to true to run calibration once at startup
+const bool CALIBRATION_ENABLED = false;
 
-// Updated threshold values for a 0-to-1000 sensor range
-// (Changed from const to variables so they can be modified during calibration)
+// DFPlayer Mini declarations
+DFRobotDFPlayerMini mp3;
+const int MP3_BUSY_PIN = 4;  // Busy pin connected to Arduino pin 4
+#define MP3_SERIAL Serial1    // Using hardware Serial1 (pins 13/RX, 14/TX)
 
-// For the thumb, a smaller bending range is used (will not be modified by calibration)
-int THUMB_LOW   = 100;  // near straight
-int THUMB_MID   = 400;  // partially bent
-int THUMB_HIGH  = 800;  // fully bent
+// Gesture Enumeration
+enum Gesture {
+  GESTURE_UNKNOWN,
+  GESTURE_HELLO,
+  GESTURE_OKAY,
+  GESTURE_LOVE,
+  GESTURE_YES
+};
 
-// The index finger maintains a similar range for natural flex
+// Threshold Values
+int THUMB_LOW   = 100;
 int INDEX_LOW   = 100;
-int INDEX_MID   = 500;
-int INDEX_HIGH  = 900;
-
-// Middle finger: a typical range for flexing
 int MIDDLE_LOW  = 150;
-int MIDDLE_MID  = 550;
-int MIDDLE_HIGH = 950;
-
-// Ring finger: thresholds are shifted lower so it registers a bend
-// even when the middle finger is flexed (simulate natural dependency)
-int RING_LOW    = 150;  // same as middle's low for early activation
-int RING_MID    = 500;  // lower mid threshold than before
-int RING_HIGH   = 900;  // fully bent reached sooner
-
-// Pinky finger: may require a bit more force to fully flex
+int RING_LOW    = 150;
 int PINKY_LOW   = 200;
-int PINKY_MID   = 600;
-int PINKY_HIGH  = 950;
 
-// BLE service and characteristic definitions
+int THUMB_MID   = 200;
+int INDEX_MID   = 300;
+int MIDDLE_MID  = 300;
+int RING_MID    = 300;
+int PINKY_MID   = 500;
+
+int THUMB_HIGH  = 600;
+int INDEX_HIGH  = 700;
+int MIDDLE_HIGH = 700;
+int RING_HIGH   = 700;
+int PINKY_HIGH  = 750;
+
+// BLE Service and Characteristics
 BLEService sensorService("180C");
 BLEStringCharacteristic sensorCharacteristic("2A57", BLERead | BLENotify, 150);
 
-// Global array to store calibration offsets for each finger
+// Global Variables
 int calibrationOffsets[5] = {0, 0, 0, 0, 0};
-
-// Global storage for five bitstream readings (each a string like "00 01 10 00 01")
 String consumerBitstreams[5];
 int consumerBitstreamsCount = 0;
 
@@ -57,22 +60,22 @@ void initIMU();
 void initBluetooth();
 bool checkForCentral(bool &runReadingLoop);
 void calibrateSensors();
-
 void readFingerSensors(int fingerReadings[5]);
 void getFingerThresholds(int fingerIndex, int &lowVal, int &midVal, int &highVal);
 String encodeFingerReadings(const int fingerReadings[5]);
-
 void readIMU(float &accX, float &accY, float &accZ,
              float &gyroX, float &gyroY, float &gyroZ,
              float &magX, float &magY, float &magZ);
-
 String buildSensorData(const int fingerReadings[5],
                        const String &encodedFingers,
                        float accX, float accY, float accZ,
                        float gyroX, float gyroY, float gyroZ,
                        float magX, float magY, float magZ);
-
 void readAndSendData();
+void initDFPlayer();
+void playGestureSound(Gesture gesture);
+bool isMP3Busy();
+Gesture GestureFromBits(uint16_t gestureBits);
 
 // ---------------------------------------------------------------------------
 //     THREADS
@@ -81,7 +84,6 @@ void producer() {
   readAndSendData();
 }
 
-// Convert a two-character binary string (eg "10") to integer value (eg 2).
 int binaryStringToInt(String s) {
   int result = 0;
   for (int i = 0; i < s.length(); i++) {
@@ -90,15 +92,12 @@ int binaryStringToInt(String s) {
   return result;
 }
 
-// Get the mode from an array of integers.
 int computeMode(int arr[], int n) {
-  int frequency[3] = {0};  // assuming valid states: 0, 1, 2 
-  // Obtain the frequency of each state
+  int frequency[3] = {0};
   for (int i = 0; i < n; i++) {
     int val = arr[i];
     frequency[val]++;      
   }
-  // Find mode based on maxCount check
   int mode = 0;
   int maxCount = frequency[0];
   for (int i = 1; i < 3; i++) {
@@ -110,94 +109,94 @@ int computeMode(int arr[], int n) {
   return mode;
 }
 
-// Function to reconstruct the gesture based on the finger modes
 uint16_t buildGestureInt(const int fingerModes[5]) {
   uint16_t gestureBits = 0;
-  gestureBits |= (fingerModes[0] & 0x3) << 8;  // thumb
-  gestureBits |= (fingerModes[1] & 0x3) << 6;  // index
-  gestureBits |= (fingerModes[2] & 0x3) << 4;  // middle
-  gestureBits |= (fingerModes[3] & 0x3) << 2;  // ring
-  gestureBits |= (fingerModes[4] & 0x3) << 0;  // pinky
-
+  gestureBits |= (fingerModes[0] & 0x3) << 8;
+  gestureBits |= (fingerModes[1] & 0x3) << 6;
+  gestureBits |= (fingerModes[2] & 0x3) << 4;
+  gestureBits |= (fingerModes[3] & 0x3) << 2;
+  gestureBits |= (fingerModes[4] & 0x3) << 0;
   return gestureBits;
 }
 
-void GestureFromBits(uint16_t gestureBits) {
-  // Output a sign based on the finalized gesture.
-  Serial.print("Final gesture: ");
+Gesture GestureFromBits(uint16_t gestureBits) {
+  Gesture currentGesture = GESTURE_UNKNOWN;
+  
   switch(gestureBits) {
     case 0b0000000000:
       Serial.println("Hello");
+      currentGesture = GESTURE_HELLO;
       break;
-    case 0b0101010101:
-      Serial.println("Claw");
+    case 0b0101000000:
+      Serial.println("Okay");
+      currentGesture = GESTURE_OKAY;
       break;
-    case 0b1010101010:
-      Serial.println("Fist");
+    case 0b0000101000:
+      Serial.println("I Love You");
+      currentGesture = GESTURE_LOVE;
       break;
     case 0b0010101010:
+    case 0b0110101010:
       Serial.println("Yes");
-      break;
-    default:
-      Serial.println("Unknown gesture");
+      currentGesture = GESTURE_YES;
       break;
   }
+
+  if(currentGesture != GESTURE_UNKNOWN && !isMP3Busy()) {
+    playGestureSound(currentGesture);
+  }
+  
+  return currentGesture;
 }
+
 void consumer() {
-  // Wait for 5 readings to be obtained
   if (consumerBitstreamsCount < 5) return;
   
   int fingerModes[5];
   
-  // Process each finger separately 
   for (int finger = 0; finger < 5; finger++) {
-    // Store the state across five readings
     int states[5];  
     
     for (int reading = 0; reading < 5; reading++) {
-      // Expected bitstream format: "XX XX XX XX XX"
-      // For finger 0, substring(0,2); finger 1, substring(3,5); finger 2, substring(6,8);
-      // finger 3, substring(9,11); finger 4, substring(12,14)
-      int startIndex = (finger == 0) ? 0 : finger * 3;  
+      int startIndex = (finger == 0) ? 0 : finger * 3;
       String pairStr = consumerBitstreams[reading].substring(startIndex, startIndex + 2);
-      
-      // Convert the two-bit string to an integer state.
       states[reading] = binaryStringToInt(pairStr);
     }
     
-    // Compute the mode state for this finger.
     fingerModes[finger] = computeMode(states, 5);
   }
   
-  // Get gesture bits based on the modes of the fingers
   uint16_t finalBits = buildGestureInt(fingerModes);
-
-  // Use a lookup to get the gesture 
   GestureFromBits(finalBits);
-  
-  // Reset the bitstream count for the next batch.
   consumerBitstreamsCount = 0;
 }
 
-// Thread objects with intervals (milliseconds).
 Thread producerThread(producer, 400);
 Thread consumerThread(consumer, 450);
 
 // ---------------------------------------------------------------------------
 //     SETUP
 // ---------------------------------------------------------------------------
-void setup() {
-  Serial.begin(9600);
+// Set volume (0-30)
 
-  // Run calibration if enabled
+
+void setup() {  Serial.begin(9600);
+  while (!Serial); // Wait for serial port to connect - CRUCIAL FOR NANO 33 BLE
+  
+  // Add debug message to confirm serial is working
+  Serial.println("Serial communication initialized");
+  
+  // Rest of your setup code...
+  pinMode(MP3_BUSY_PIN, INPUT_PULLUP);
+  initDFPlayer();
+
+  mp3.volume(30);
   if (CALIBRATION_ENABLED) {
     calibrateSensors();
   }
 
-  // 1) IMU Initialization
   initIMU();
 
-  // 2) (Optional) Bluetooth Initialization
   if (BLUETOOTH_ENABLED) {
     initBluetooth();
   } else {
@@ -212,26 +211,67 @@ void loop() {
   bool runReadingLoop = false;
 
   if (BLUETOOTH_ENABLED) {
-    // Check if a central device just connected; set runReadingLoop accordingly
     checkForCentral(runReadingLoop);
-
-    // If we found a central and want to read sensors, do so until disconnected
     while (runReadingLoop) {
       producerThread.run();
       consumerThread.run();
-      // If the central disconnects, stop reading
       if (!BLE.central().connected()) {
         runReadingLoop = false;
         Serial.println("Disconnected from central");
       }
       delay(200);
     }
-  } 
-  else {
-    // If BLE is disabled, just run data reading in a continuous loop
+  } else {
     producerThread.run();
     consumerThread.run();
     delay(200);
+  }
+}
+
+// ---------------------------------------------------------------------------
+//     DFPlayer Functions
+// ---------------------------------------------------------------------------
+#define MP3_SERIAL Serial1  // Use hardware Serial1
+
+void initDFPlayer() {
+  MP3_SERIAL.begin(9600);
+  Serial.println("Initializing DFPlayer...");
+  delay(1000); // Add initial delay
+  
+  if(!mp3.begin(MP3_SERIAL)) {
+    Serial.println("DFPlayer initialization failed!");
+    Serial.println("Check connections and reset");
+    while(1) { // Blink LED if available
+      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+      delay(500);
+    }
+  }
+  
+  mp3.volume(30);
+  Serial.println("DFPlayer ready");
+  delay(500); // Add post-init delay
+}
+
+bool isMP3Busy() {
+  return digitalRead(MP3_BUSY_PIN) == LOW;
+}
+
+void playGestureSound(Gesture gesture) {
+  switch(gesture) {
+    case GESTURE_HELLO:
+      mp3.play(1);  // Play track 0001.mp3
+      break;
+    case GESTURE_OKAY:
+      mp3.play(2);  // Play track 0002.mp3
+      break;
+    case GESTURE_LOVE:
+      mp3.play(3);  // Play track 0003.mp3
+      break;
+    case GESTURE_YES:
+      mp3.play(4);  // Play track 0004.mp3
+      break;
+    default:
+      break;
   }
 }
 
