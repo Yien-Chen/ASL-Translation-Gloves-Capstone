@@ -9,7 +9,7 @@
 //     GLOBAL SETTINGS & CONSTANTS
 // ---------------------------------------------------------------------------
 const bool BLUETOOTH_ENABLED   = false;
-const bool CALIBRATION_ENABLED = false;
+const bool CALIBRATION_ENABLED = true;
 
 // DFPlayer Mini declarations
 DFRobotDFPlayerMini mp3;
@@ -80,6 +80,9 @@ Gesture GestureFromBits(uint16_t gestureBits);
 // ---------------------------------------------------------------------------
 //     THREADS
 // ---------------------------------------------------------------------------
+
+uint16_t previousGesture = 0b1111111111; 
+
 void producer() {
   readAndSendData();
 }
@@ -121,30 +124,58 @@ uint16_t buildGestureInt(const int fingerModes[5]) {
 
 Gesture GestureFromBits(uint16_t gestureBits) {
   Gesture currentGesture = GESTURE_UNKNOWN;
-  
-  switch(gestureBits) {
-    case 0b0000000000:
-      Serial.println("Hello");
-      currentGesture = GESTURE_HELLO;
-      break;
-    case 0b0101000000:
-      Serial.println("Okay");
-      currentGesture = GESTURE_OKAY;
-      break;
-    case 0b0000101000:
-      Serial.println("I Love You");
-      currentGesture = GESTURE_LOVE;
-      break;
-    case 0b0010101010:
-    case 0b0110101010:
-      Serial.println("Yes");
-      currentGesture = GESTURE_YES;
-      break;
+   // If repeated gesture ignore it 
+   if(gestureBits == previousGesture){
+    Serial.print("Ignore repeated gesture");
+  } else {
+    switch(gestureBits) {
+      case 0b1000001010:
+        Serial.println("Hello");
+        mp3.play(1);  // Play track 001.mp3
+        break;
+      case 0b0010101010:
+        Serial.println("Yes");
+        mp3.play(2);  // Play track 002.mp3
+        break;
+      case 0b0000101000:
+        Serial.println("I Love You");
+        mp3.play(3);  // Play track 003.mp3
+        break;
+      case 0b1000000000:
+        Serial.println("Thank you");
+        mp3.play(4);  // Play track 004.mp3
+        break;
+      case 0b1010000000:
+        Serial.println("How");
+        mp3.play(5);  // Play track 005.mp3
+        break;
+      case 0b1000100000:
+        Serial.println("Are");
+        mp3.play(6);  // Play track 006.mp3
+        break;
+      case 0b1000001000:
+        Serial.println("You");
+        mp3.play(7);  // Play track 007.mp3
+        break;
+      case 0b0000001000:
+        Serial.println("Medium Coffee");
+        mp3.play(8);  // Play track 008.mp3
+        break;
+      case 0b0000001010:
+        Serial.println("Please");
+        mp3.play(9);  // Play track 009.mp3
+        break;
+      default:
+        Serial.println("Unknown gesture");
+        break;
+    }
+    // Set previous gesture to current gesture
+    previousGesture = gestureBits;
   }
 
-  if(currentGesture != GESTURE_UNKNOWN && !isMP3Busy()) {
-    playGestureSound(currentGesture);
-  }
+  // if(currentGesture != GESTURE_UNKNOWN && !isMP3Busy()) {
+  //   playGestureSound(currentGesture);
+  // }
   
   return currentGesture;
 }
@@ -181,7 +212,7 @@ Thread consumerThread(consumer, 450);
 
 
 void setup() {  Serial.begin(9600);
-  while (!Serial); // Wait for serial port to connect - CRUCIAL FOR NANO 33 BLE
+
   
   // Add debug message to confirm serial is working
   Serial.println("Serial communication initialized");
